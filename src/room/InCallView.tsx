@@ -88,6 +88,11 @@ import { CallEventAudioRenderer } from "./CallEventAudioRenderer";
 import {
   debugTileLayout as debugTileLayoutSetting,
   matrixRTCMode as matrixRTCModeSetting,
+  useAdvancedScreenShare as useAdvancedScreenShareSetting,
+  screenShareResolution as screenShareResolutionSetting,
+  screenShareFramerate as screenShareFramerateSetting,
+  screenShareBitrate as screenShareBitrateSetting,
+  screenShareCodec as screenShareCodecSetting,
   useSetting,
 } from "../settings/settings";
 import { ReactionsReader } from "../reactions/ReactionsReader";
@@ -273,6 +278,11 @@ export const InCallView: FC<InCallViewProps> = ({
   const earpieceMode = useBehavior(vm.earpieceMode$);
   const audioOutputSwitcher = useBehavior(vm.audioOutputSwitcher$);
   const sharingScreen = useBehavior(vm.sharingScreen$);
+  const [useAdvancedScreenShare] = useSetting(useAdvancedScreenShareSetting);
+  const [screenShareResolution] = useSetting(screenShareResolutionSetting);
+  const [screenShareFramerate] = useSetting(screenShareFramerateSetting);
+  const [screenShareBitrate] = useSetting(screenShareBitrateSetting);
+  const [screenShareCodec] = useSetting(screenShareCodecSetting);
 
   const ringOverlay = useBehavior(vm.ringOverlay$);
   const fatalCallError = useBehavior(vm.fatalError$);
@@ -727,7 +737,15 @@ export const InCallView: FC<InCallViewProps> = ({
         key="share_screen"
         className={styles.shareScreen}
         enabled={sharingScreen}
-        onClick={vm.toggleScreenSharing}
+        onClick={() =>
+          vm.toggleScreenSharing(
+            useAdvancedScreenShare,
+            screenShareResolution,
+            screenShareFramerate,
+            screenShareBitrate,
+            screenShareCodec,
+          )
+        }
         onTouchEnd={onControlsTouchEnd}
         data-testid="incall_screenshare"
       />,
