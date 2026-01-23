@@ -10,6 +10,7 @@ import {
   ParticipantEvent,
   type LocalParticipant,
   type ScreenShareCaptureOptions,
+  type TrackPublishOptions,
   RoomEvent,
   MediaDeviceFailure,
 } from "livekit-client";
@@ -633,12 +634,26 @@ export const createLocalMembership$ = ({
     ),
   );
 
-  let toggleScreenSharing: (() => void) | null = null;
+  let toggleScreenSharing:
+    | ((
+        useAdvancedScreenShare: boolean,
+        screenShareResolution: string,
+        screenShareFramerate: number,
+        screenShareBitrate: number,
+        screenShareCodec: "vp8" | "h264" | "h265" | "vp9" | "av1" | undefined,
+      ) => void)
+    | null = null;
   if (
     "getDisplayMedia" in (navigator.mediaDevices ?? {}) &&
     !getUrlParams().hideScreensharing
   ) {
-    toggleScreenSharing = (): void => {
+    toggleScreenSharing = (
+      useAdvancedScreenShare,
+      screenShareResolution,
+      screenShareFramerate,
+      screenShareBitrate,
+      screenShareCodec,
+    ): void => {
       const screenshareSettings: ScreenShareCaptureOptions = {
         audio: true,
         selfBrowserSurface: "include",
@@ -651,6 +666,27 @@ export const createLocalMembership$ = ({
           targetScreenshareState ? "On" : "Off"
         }`,
       );
+
+      let publishOptions: TrackPublishOptions = {};
+
+      if (useAdvancedScreenShare) {
+        const screenShareResolutionTuple = screenShareResolution.split("x");
+
+        screenshareSettings.resolution = {
+          width: Number(screenShareResolutionTuple[0]),
+          height: Number(screenShareResolutionTuple[1]),
+          frameRate: screenShareFramerate,
+        };
+
+        publishOptions = {
+          screenShareEncoding: {
+            maxBitrate: screenShareBitrate,
+            maxFramerate: screenShareFramerate,
+          },
+          videoCodec: screenShareCodec,
+        };
+      }
+
       // If a connection is ready, toggle screen sharing.
       // We deliberately do nothing in the case of a null connection because
       // it looks nice for the call control buttons to all become available
@@ -660,7 +696,11 @@ export const createLocalMembership$ = ({
       // is still initializing or publishing tracks, because there's no
       // technical reason to disallow this. LiveKit will publish if it can.
       participant$.value
-        ?.setScreenShareEnabled(targetScreenshareState, screenshareSettings)
+        ?.setScreenShareEnabled(
+          targetScreenshareState,
+          screenshareSettings,
+          publishOptions,
+        )
         .catch(logger.error);
     };
   }

@@ -23,10 +23,16 @@ import {
   useSetting,
   soundEffectVolume as soundEffectVolumeSetting,
   backgroundBlur as backgroundBlurSetting,
+  useAdvancedScreenShare as useAdvancedScreenShareSetting,
+  screenShareResolution as screenShareResolutionSetting,
+  screenShareFramerate as screenShareFramerateSetting,
+  screenShareBitrate as screenShareBitrateSetting,
+  screenShareCodec as screenShareCodecSetting,
   developerMode,
 } from "./settings";
 import { PreferencesSettingsTab } from "./PreferencesSettingsTab";
 import { Slider } from "../Slider";
+import { Sliderer } from "../Sliderer";
 import { DeviceSelection } from "./DeviceSelection";
 import { useTrackProcessor } from "../livekit/TrackProcessorContext";
 import { DeveloperSettingsTab } from "./DeveloperSettingsTab";
@@ -169,6 +175,22 @@ export const SettingsModal: FC<Props> = ({
     ),
   };
 
+  const [useAdvancedScreenShare, setUseAdvancedScreenShare] = useSetting(
+    useAdvancedScreenShareSetting,
+  );
+  const [screenShareResolution, setScreenShareResolution] = useSetting(
+    screenShareResolutionSetting,
+  );
+  const [screenShareFramerate, setScreenShareFramerate] = useSetting(
+    screenShareFramerateSetting,
+  );
+  const [screenShareBitrate, setScreenShareBitrate] = useSetting(
+    screenShareBitrateSetting,
+  );
+  const [screenShareCodec, setScreenShareCodec] = useSetting(
+    screenShareCodecSetting,
+  );
+
   const videoTab: Tab<SettingsTab> = {
     key: "video",
     name: t("common.video"),
@@ -180,6 +202,90 @@ export const SettingsModal: FC<Props> = ({
             title={t("settings.devices.camera")}
             numberedLabel={(n) => t("settings.devices.camera_numbered", { n })}
           />
+          <h4>{"Screen share"}</h4>
+          <div>
+            <InputField
+              id="useAdvancedScreenShare"
+              type="checkbox"
+              checked={useAdvancedScreenShare}
+              label={"Advanced screen share"}
+              description={"Enable advanced screen share settings"}
+              onChange={(event: ChangeEvent<HTMLInputElement>): void =>
+                setUseAdvancedScreenShare(event.target.checked)
+              }
+            />
+          </div>
+          {useAdvancedScreenShare && (
+            <div>
+              <div>
+                <p>resolution</p>
+                <select
+                  value={screenShareResolution}
+                  onChange={(event) =>
+                    setScreenShareResolution(event.target.value)
+                  }
+                >
+                  <option value="256x144">256x144</option>
+                  <option value="1024x576">1024x576</option>
+                  <option value="1280x720">1280x720</option>
+                  <option value="1920x1080">1920x1080</option>
+                  <option value="2560x1440">2560x1440</option>
+                  <option value="3840x2160">3840x2160</option>
+                </select>
+              </div>
+              <div className={styles.volumeSlider}>
+                <p>framerate</p>
+                <Sliderer
+                  label="framerate"
+                  value={screenShareFramerate}
+                  onValueChange={setScreenShareFramerate}
+                  min={5}
+                  max={60}
+                  step={5}
+                  tooltipSuffix=" fps"
+                />
+              </div>
+              <div className={styles.volumeSlider}>
+                <p>bitrate</p>
+                <Sliderer
+                  label="bitrate"
+                  value={screenShareBitrate}
+                  onValueChange={setScreenShareBitrate}
+                  min={500_000}
+                  max={10_000_000}
+                  step={500_000}
+                  tooltipMultiplier={1 / 1_000_000}
+                  tooltipDecimals={1}
+                  tooltipSuffix=" Mbps"
+                />
+              </div>
+              <br />
+              <div>
+                <p>codec</p>
+                <select
+                  value={screenShareCodec}
+                  onChange={(event) =>
+                    setScreenShareCodec(
+                      event.target.value as
+                        | "vp8"
+                        | "vp9"
+                        | "h264"
+                        | "h265"
+                        | "av1"
+                        | undefined,
+                    )
+                  }
+                >
+                  <option value="vp8">vp8</option>
+                  <option value="vp9">vp9</option>
+                  <option value="h264">h264</option>
+                  <option value="h265">h265</option>
+                  <option value="av1">av1</option>
+                </select>
+              </div>
+            </div>
+          )}
+          <br />
         </Form>
         <Separator />
         <BlurCheckbox />

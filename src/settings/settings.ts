@@ -96,6 +96,30 @@ export const videoInput = new Setting<string | undefined>(
   undefined,
 );
 
+export const useAdvancedScreenShare = new Setting<boolean>(
+  "use-advanced-screen-share",
+  false,
+);
+
+export const screenShareResolution = new Setting<string>(
+  "screen-share-resolution",
+  "1280x720",
+);
+
+export const screenShareFramerate = new Setting<number>(
+  "screen-share-framerate",
+  30,
+);
+
+export const screenShareBitrate = new Setting<number>(
+  "screen-share-bitrate",
+  2_000_000,
+);
+
+export const screenShareCodec = new Setting<
+  "vp8" | "vp9" | "h264" | "h265" | "av1" | undefined
+>("screen-share-codec", "vp8");
+
 export const backgroundBlur = new Setting<boolean>("background-blur", false);
 
 export const showHandRaisedTimer = new Setting<boolean>(
