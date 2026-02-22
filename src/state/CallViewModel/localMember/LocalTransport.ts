@@ -7,19 +7,21 @@ Please see LICENSE in the repository root for full details.
 
 import {
   type CallMembership,
-  isLivekitTransport,
-  type LivekitTransport,
   isLivekitTransportConfig,
   type Transport,
+  type LivekitTransportConfig,
 } from "matrix-js-sdk/lib/matrixrtc";
 import { MatrixError, type MatrixClient } from "matrix-js-sdk";
 import {
-  combineLatest,
   distinctUntilChanged,
+  first,
   from,
   map,
+  merge,
   of,
+  startWith,
   switchMap,
+  tap,
 } from "rxjs";
 import { logger as rootLogger } from "matrix-js-sdk/lib/logger";
 import { AutoDiscovery } from "matrix-js-sdk/lib/autodiscovery";
@@ -57,9 +59,10 @@ interface Props {
     "getDomain" | "baseUrl" | "_unstable_getRTCTransports"
   > &
     OpenIDClientParts;
+  // Used by the jwt service to create the livekit room and compute the livekit alias.
   roomId: string;
-  useOldestMember$: Behavior<boolean>;
-  forceJwtEndpoint$: Behavior<JwtEndpointVersion>;
+  useOldestMember: boolean;
+  forceJwtEndpoint: JwtEndpointVersion;
   delayId$: Behavior<string | null>;
 }
 
@@ -90,26 +93,38 @@ export enum JwtEndpointVersion {
 // 2.
 // We need to make sure we do not sent livekit_alias in sticky events and that we drop all code for sending state events!
 export interface LocalTransportWithSFUConfig {
-  transport: LivekitTransport;
+  transport: LivekitTransportConfig;
   sfuConfig: SFUConfig;
 }
+
 export function isLocalTransportWithSFUConfig(
-  obj: LivekitTransport | LocalTransportWithSFUConfig,
+  obj: LivekitTransportConfig | LocalTransportWithSFUConfig,
 ): obj is LocalTransportWithSFUConfig {
   return "transport" in obj && "sfuConfig" in obj;
 }
 
+interface LocalTransport {
+  /**
+   * The transport to be advertised in our MatrixRTC membership. `null` when not
+   * yet fetched/validated.
+   */
+  advertised$: Behavior<LivekitTransportConfig | null>;
+  /**
+   * The transport to connect to and publish media on. `null` when not yet known
+   * or available.
+   */
+  active$: Behavior<LocalTransportWithSFUConfig | null>;
+}
+
 /**
- * This class is responsible for managing the local transport.
- * "Which transport is the local member going to use"
+ * Connects to the JWT service and determines the transports that the local member should use.
  *
  * @prop useOldestMember Whether to use the same transport as the oldest member.
  * This will only update once the first oldest member appears. Will not recompute if the oldest member leaves.
- *
- * @prop useOldJwtEndpoint$ Whether to set forceOldJwtEndpoint on the returned transport and to use the old JWT endpoint.
+ * @prop useOldJwtEndpoint Whether to set forceOldJwtEndpoint on the returned transport and to use the old JWT endpoint.
  * This is used when the connection manager needs to know if it has to use the legacy endpoint which implies a string concatenated rtcBackendIdentity.
  * (which is expected for non sticky event based rtc member events)
- * @returns The local transport. It will be created using the correct sfu endpoint based on the useOldJwtEndpoint$ value.
+ * @returns The transport to advertise in the local MatrixRTC membership, along with the transport to actively publish media to.
  * @throws MatrixRTCTransportMissingError | FailToGetOpenIdToken
  */
 export const createLocalTransport$ = ({
@@ -118,115 +133,156 @@ export const createLocalTransport$ = ({
   ownMembershipIdentity,
   client,
   roomId,
-  useOldestMember$,
-  forceJwtEndpoint$,
+  useOldestMember,
+  forceJwtEndpoint,
   delayId$,
-}: Props): Behavior<LocalTransportWithSFUConfig | null> => {
+}: Props): LocalTransport => {
   /**
-   * The transport over which we should be actively publishing our media.
-   * undefined when not joined.
+   * The LiveKit transport in use by the oldest RTC membership. `null` when the
+   * oldest member has no such transport.
    */
-  const oldestMemberTransport$ =
-    scope.behavior<LocalTransportWithSFUConfig | null>(
-      combineLatest([memberships$, useOldestMember$]).pipe(
-        map(([memberships, useOldestMember]) => {
-          if (!useOldestMember) return null; // No need to do any prefetching if not using oldest member
-          const oldestMember = memberships.value[0];
-          const transport = oldestMember?.getTransport(oldestMember);
-          if (!transport) return null;
-          return transport;
-        }),
-        switchMap((transport) => {
-          if (transport !== null && isLivekitTransport(transport)) {
-            // Get the open jwt token to connect to the sfu
-            const computeLocalTransportWithSFUConfig =
-              async (): Promise<LocalTransportWithSFUConfig> => {
-                // await sleep(1000);
-                return {
-                  transport,
-                  sfuConfig: await getSFUConfigWithOpenID(
-                    client,
-                    ownMembershipIdentity,
-                    transport.livekit_service_url,
-                    roomId,
-                    { forceJwtEndpoint: JwtEndpointVersion.Legacy },
-                    logger,
-                  ),
-                };
-              };
-            return from(computeLocalTransportWithSFUConfig());
-          }
-          return of(null);
-        }),
-      ),
-      null,
-    );
+  const oldestMemberTransport$ = scope.behavior<LivekitTransportConfig | null>(
+    memberships$.pipe(
+      map((memberships) => {
+        const oldestMember = memberships.value[0];
+        if (oldestMember === undefined) {
+          logger.info("Oldest member: not found");
+          return null;
+        }
+        const transport = oldestMember.getTransport(oldestMember);
+        if (transport === undefined) {
+          logger.warn(
+            `Oldest member: ${oldestMember.userId}|${oldestMember.deviceId}|${oldestMember.memberId} has no transport`,
+          );
+          return null;
+        }
+        if (!isLivekitTransportConfig(transport)) {
+          logger.warn(
+            `Oldest member: ${oldestMember.userId}|${oldestMember.deviceId}|${oldestMember.memberId} has invalid transport`,
+          );
+          return null;
+        }
+        logger.info(
+          "Oldest member: ${oldestMember.userId}|${oldestMember.deviceId}|${oldestMember.memberId} has valid transport",
+        );
+        return transport;
+      }),
+      distinctUntilChanged(areLivekitTransportsEqual),
+    ),
+  );
 
   /**
    * The transport that we would personally prefer to publish on (if not for the
-   * transport preferences of others, perhaps).
+   * transport preferences of others, perhaps). `null` until fetched and
+   * validated.
    *
    * @throws MatrixRTCTransportMissingError | FailToGetOpenIdToken
    */
-  const preferredTransport$ = scope.behavior(
-    // preferredTransport$ (used for multi sfu) needs to know if we are using the old or new
-    // jwt endpoint (`get_token` vs `sfu/get`) based on that the jwt endpoint will compute the rtcBackendIdentity
-    // differently. (sha(`${userId}|${deviceId}|${memberId}`) vs `${userId}|${deviceId}|${memberId}`)
-    // When using sticky events (we need to use the new endpoint).
-    combineLatest([customLivekitUrl.value$, delayId$, forceJwtEndpoint$]).pipe(
-      switchMap(([customUrl, delayId, forceEndpoint]) => {
-        logger.info(
-          "Creating preferred transport based on: ",
-          "customUrl: ",
-          customUrl,
-          "delayId: ",
-          delayId,
-          "forceEndpoint: ",
-          forceEndpoint,
-        );
-        return from(
-          makeTransport(
-            client,
-            ownMembershipIdentity,
-            roomId,
-            customUrl,
-            forceEndpoint,
-            delayId ?? undefined,
+  const preferredTransport$ =
+    scope.behavior<LocalTransportWithSFUConfig | null>(
+      // preferredTransport$ (used for multi sfu) needs to know if we are using the old or new
+      // jwt endpoint (`get_token` vs `sfu/get`) based on that the jwt endpoint will compute the rtcBackendIdentity
+      // differently. (sha(`${userId}|${deviceId}|${memberId}`) vs `${userId}|${deviceId}|${memberId}`)
+      // When using sticky events (we need to use the new endpoint).
+      customLivekitUrl.value$.pipe(
+        switchMap((customUrl) =>
+          startWith<LocalTransportWithSFUConfig | null>(null)(
+            // Fetch the SFU config, and repeat this asynchronously for every
+            // change in delay ID.
+            delayId$.pipe(
+              switchMap(async (delayId) => {
+                logger.info(
+                  "Creating preferred transport based on: ",
+                  "customUrl: ",
+                  customUrl,
+                  "delayId: ",
+                  delayId,
+                  "forceJwtEndpoint: ",
+                  forceJwtEndpoint,
+                );
+                return makeTransport(
+                  client,
+                  ownMembershipIdentity,
+                  roomId,
+                  customUrl,
+                  forceJwtEndpoint,
+                  delayId ?? undefined,
+                );
+              }),
+              // We deliberately hide any changes to the SFU config because we
+              // do not actually want the app to reconnect whenever the JWT
+              // token changes due to us delegating a new delayed event. The
+              // initial SFU config for the transport is all the app needs.
+              distinctUntilChanged((prev, next) =>
+                areLivekitTransportsEqual(prev.transport, next.transport),
+              ),
+            ),
           ),
-        );
-      }),
-    ),
-    null,
-  );
+        ),
+      ),
+    );
 
-  /**
-   * The chosen transport we should advertise in our MatrixRTC membership.
-   */
-  return scope.behavior(
-    combineLatest([
-      useOldestMember$,
-      oldestMemberTransport$,
-      preferredTransport$,
-    ]).pipe(
-      map(([useOldestMember, oldestMemberTransport, preferredTransport]) => {
-        return useOldestMember
-          ? (oldestMemberTransport ?? preferredTransport)
-          : preferredTransport;
-      }),
-      distinctUntilChanged((t1, t2) => {
-        logger.info(
-          "Local Transport Update from:",
-          t1?.transport.livekit_service_url,
-          " to ",
-          t2?.transport.livekit_service_url,
-        );
-        return areLivekitTransportsEqual(
-          t1?.transport ?? null,
-          t2?.transport ?? null,
-        );
-      }),
+  if (useOldestMember) {
+    // --- Oldest member mode ---
+    return {
+      // Never update the transport that we advertise in our membership. Just
+      // take the first valid oldest member or preferred transport that we learn
+      // about, and stick with that. This avoids unnecessary SFU hops and room
+      // state changes.
+      advertised$: scope.behavior(
+        merge(
+          oldestMemberTransport$,
+          preferredTransport$.pipe(map((t) => t?.transport ?? null)),
+        ).pipe(
+          first((t) => t !== null),
+          tap((t) =>
+            logger.info(`Advertise transport: ${t.livekit_service_url}`),
+          ),
+        ),
+        null,
+      ),
+      // Publish on the transport used by the oldest member.
+      active$: scope.behavior(
+        oldestMemberTransport$.pipe(
+          switchMap((transport) => {
+            // Oldest member not available (or invalid SFU config).
+            if (transport === null) return of(null);
+            // Oldest member available: fetch the SFU config.
+            const fetchOldestMemberTransport =
+              async (): Promise<LocalTransportWithSFUConfig> => ({
+                transport,
+                sfuConfig: await getSFUConfigWithOpenID(
+                  client,
+                  ownMembershipIdentity,
+                  transport.livekit_service_url,
+                  roomId,
+                  { forceJwtEndpoint: JwtEndpointVersion.Legacy },
+                  logger,
+                ),
+              });
+            return from(fetchOldestMemberTransport()).pipe(startWith(null));
+          }),
+          tap((t) =>
+            logger.info(
+              `Publish on transport: ${t?.transport.livekit_service_url}`,
+            ),
+          ),
+        ),
+      ),
+    };
+  }
+
+  // --- Multi-SFU mode ---
+  // Always publish on and advertise the preferred transport.
+  return {
+    advertised$: scope.behavior(
+      preferredTransport$.pipe(
+        map((t) => t?.transport ?? null),
+        distinctUntilChanged(areLivekitTransportsEqual),
+      ),
     ),
-  );
+    active$: preferredTransport$,
+  };
 };
 
 const FOCI_WK_KEY = "org.matrix.msc4143.rtc_foci";
@@ -288,18 +344,6 @@ async function makeTransport(
       transport: {
         type: "livekit",
         livekit_service_url: url,
-        // WARNING PLS READ ME!!!
-        // This looks unintuitive especially considering that `sfuConfig.livekitAlias` exists.
-        // Why do we not use: `livekit_alias: sfuConfig.livekitAlias`
-        //
-        //  - This is going to be used for sending our state event transport (focus_preferred)
-        //  - In sticky events it is expected to NOT send this field at all. The transport is only the `type`, `livekit_service_url`
-        //  - If we set it to the hased alias we get from the jwt, we will end up using the hashed alias as the body.roomId field
-        //    in v0.16.0. (It will use oldest member transport. It is using the transport.livekit_alias as the body.roomId)
-        //
-        // TLDR this is a temporal field that allow for comaptibilty but the spec expects it to not exists. (but its existance also does not break anything)
-        // It is just named poorly: It was intetended to be the actual alias. But now we do pseudonymys ids so we use a hashed alias.
-        livekit_alias: roomId,
       },
       sfuConfig,
     };
